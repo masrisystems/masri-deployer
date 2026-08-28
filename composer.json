@@ -1,12 +1,13 @@
 {
-  "name": "masri/deployer",
-  "description": "Automated deployment scripts for Masri projects",
+  "name": "masrisystems/masri-deployer",
+  "description": "Universal deployment orchestrator and GitHub Actions workflow generator for Laravel, Node, and Static projects",
   "type": "library",
   "license": "MIT",
   "authors": [
     {
-      "name": "Masri",
-      "email": "you@example.com"
+      "name": "Masri Systems",
+      "email": "dev@masrisystems.com",
+      "homepage": "https://masrisystems.com"
     }
   ],
   "autoload": {
@@ -21,5 +22,7 @@
       ]
     }
   },
-  "require": {}
+  "require": {
+    "php": "^8.2"
+  }
 }

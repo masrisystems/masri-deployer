@@ -1,0 +1,29 @@
+{
+  "name": "{{APP_NAME}}",
+  "type": "{{PROJECT_TYPE}}",
+  "domain": "{{APP_DOMAIN}}",
+  "environments": {
+    "production": {
+      "branch": "{{PROD_BRANCH}}",
+      "user": "{{PROD_USER}}",
+      "host": "{{PROD_HOST}}",
+      "app_path": "{{PROD_APP_PATH}}",
+      "ssh_key_secret": "{{PROD_SSH_KEY_SECRET}}",
+      "process_manager": "{{PROCESS_MANAGER}}",
+      "ssr_process": "{{SSR_PROCESS}}",
+      "queue_process": "{{QUEUE_PROCESS}}",
+      "health_check_paths": ["", "/up", "/robots.txt", "/sitemap.xml"]
+    },
+    "staging": {
+      "branch": "{{STAGING_BRANCH}}",
+      "user": "{{STAGING_USER}}",
+      "host": "{{STAGING_HOST}}",
+      "app_path": "{{STAGING_APP_PATH}}",
+      "ssh_key_secret": "{{STAGING_SSH_KEY_SECRET}}",
+      "process_manager": "{{PROCESS_MANAGER}}",
+      "ssr_process": "{{SSR_PROCESS}}",
+      "queue_process": "{{QUEUE_PROCESS}}",
+      "health_check_paths": ["", "/up", "/robots.txt"]
+    }
+  }
+}

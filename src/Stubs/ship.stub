@@ -1,0 +1,259 @@
+#!/bin/bash
+# ==============================================================================
+# Masri Deployer — Local Fast Deployment Orchestrator
+# Application: {{APP_NAME}}
+# Target: {{PROD_USER}}@{{PROD_HOST}}:{{PROD_APP_PATH}}
+# Usage:
+#   ./ship.sh          -> Run full deployment
+#   ./ship.sh status   -> Inspect remote server status & processes
+# ==============================================================================
+
+set -e
+
+# --- CONFIGURATION ---
+REMOTE_USER="${DEPLOY_USER:-{{PROD_USER}}}"
+REMOTE_HOST="${DEPLOY_HOST:-{{PROD_HOST}}}"
+REMOTE_APP_PATH="${DEPLOY_APP_PATH:-{{PROD_APP_PATH}}}"
+REMOTE_DEPLOY_SCRIPT="${REMOTE_APP_PATH}/deploy.sh"
+SSR_PROCESS="{{SSR_PROCESS}}"
+QUEUE_PROCESS="{{QUEUE_PROCESS}}"
+APP_DOMAIN="{{APP_DOMAIN}}"
+TIMESTAMP=$(date +%s)
+DEPLOY_STAGING_DIR="${REMOTE_APP_PATH}/.deploy/${TIMESTAMP}"
+
+# --- LOCAL PHP RUNTIME DETECTION ---
+if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+    if [ -f "$USERPROFILE/.config/herd/bin/php.bat" ]; then
+        LOCAL_PHP_BIN="$USERPROFILE/.config/herd/bin/php.bat"
+    elif [ -f "C:/Users/super/.config/herd/bin/php.bat" ]; then
+        LOCAL_PHP_BIN="C:/Users/super/.config/herd/bin/php.bat"
+    else
+        LOCAL_PHP_BIN="php"
+    fi
+else
+    LOCAL_PHP_BIN="php"
+fi
+
+# --- MODE: STATUS CHECK ---
+if [ "${1:-}" == "status" ]; then
+    echo "🔍 Checking Remote Server Status on ${REMOTE_HOST} (${REMOTE_USER})..."
+    echo "---------------------------------------------------"
+    ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+        export PATH=\$HOME/bin:\$PATH
+        echo '📊 Process Manager Status:'
+        if command -v supervisorctl &> /dev/null; then
+            supervisorctl status 2>/dev/null || echo '⚠️ Supervisor running with no active jobs'
+        fi
+        if command -v systemctl &> /dev/null; then
+            systemctl --user status ${SSR_PROCESS} --no-pager 2>/dev/null || true
+        fi
+        if command -v pm2 &> /dev/null || [ -f \$HOME/bin/pm2 ]; then
+            PM2_BIN=\$(command -v pm2 || echo \$HOME/bin/pm2)
+            \$PM2_BIN list 2>/dev/null || true
+        fi
+
+        echo ''
+        echo '🛠️  Maintenance Mode:'
+        if [ -f '${REMOTE_APP_PATH}/storage/framework/down' ]; then
+            echo '❌ Application is in MAINTENANCE MODE (Down)'
+        else
+            echo '✅ Application is LIVE (Up)'
+        fi
+
+        echo ''
+        echo '💾 Disk Usage (Build Assets):'
+        du -sh '${REMOTE_APP_PATH}/public/build' 2>/dev/null || echo '⚠️ No public/build directory found'
+    "
+    echo "---------------------------------------------------"
+    exit 0
+fi
+
+# --- SAFETY MECHANISM (AUTO-ROLLBACK TRAP) ---
+cleanup() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo ""
+        echo "❌ DEPLOYMENT FAILED! (Exit Code: $exit_code)"
+        echo "⚠️  Initiating emergency rollback and recovery..."
+        ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+            cd '${REMOTE_APP_PATH}' || true
+            if [ -d 'public/build_previous' ]; then
+                rm -rf public/build
+                mv public/build_previous public/build
+                echo '✓ Restored previous client build assets.'
+            fi
+            if [ -d 'bootstrap/ssr_previous' ]; then
+                rm -rf bootstrap/ssr
+                mv bootstrap/ssr_previous bootstrap/ssr
+                echo '✓ Restored previous SSR build bundle.'
+            fi
+            rm -rf '${DEPLOY_STAGING_DIR}'
+            if [ -f 'artisan' ]; then
+                php artisan up || true
+            fi
+        " || true
+        echo "⚠️  Application recovery completed."
+    fi
+}
+trap cleanup EXIT
+
+echo "==================================================="
+echo "🚀 Masri Deployer — Shipping {{APP_NAME}}"
+echo "   Target: ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_APP_PATH}"
+echo "==================================================="
+
+# --- STEP 1: PRE-FLIGHT (GIT BRANCH CHECK) ---
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
+EXPECTED_BRANCH="{{PROD_BRANCH}}"
+if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
+    echo "⚠️ Current branch is '$CURRENT_BRANCH'. Production branch is '$EXPECTED_BRANCH'."
+    read -p "Do you want to continue deploying from $CURRENT_BRANCH? (y/N): " CONTINUE_BRANCH
+    if [[ ! "$CONTINUE_BRANCH" =~ ^[Yy]$ ]]; then
+        echo "❌ Deployment aborted."
+        exit 1
+    fi
+fi
+
+# --- STEP 2: CODE FORMATTING & QUALITY ---
+if [ -f "vendor/bin/pint" ] || [ -f "vendor/bin/pint.bat" ]; then
+    echo "🧹 Running Pint Code Formatter..."
+    vendor/bin/pint --dirty --format agent 2>/dev/null || "$LOCAL_PHP_BIN" vendor/bin/pint 2>/dev/null || true
+fi
+
+# --- STEP 3: AUTOMATED TEST SUITE ---
+if [ -f "artisan" ]; then
+    echo "🧪 Run tests before starting? [Y/n] (Auto-selecting 'y' in 5s...)"
+    if [ -t 0 ]; then
+        read -t 5 RUN_TESTS || RUN_TESTS="y"
+    else
+        RUN_TESTS="y"
+    fi
+    if [ -z "$RUN_TESTS" ]; then RUN_TESTS="y"; fi
+
+    if [[ "$RUN_TESTS" =~ ^[Yy]$ ]]; then
+        echo "🧪 Executing Test Suite..."
+        "$LOCAL_PHP_BIN" artisan test --compact || php artisan test --compact
+    else
+        echo "⏩ Skipping tests."
+    fi
+fi
+
+# --- STEP 4: VERSION BUMP ---
+if [ -f "package.json" ]; then
+    echo "📦 Select version bump? [patch (default) / minor / major / none] (Auto-selecting 'none' in 5s...)"
+    if [ -t 0 ]; then
+        read -t 5 BUMP || BUMP="none"
+    else
+        BUMP="none"
+    fi
+    if [ -z "$BUMP" ]; then BUMP="none"; fi
+
+    if [ "$BUMP" != "none" ]; then
+        echo "🔖 Bumping version ($BUMP)..."
+        npm version "$BUMP" --no-git-tag-version
+        NEW_VERSION=$(node -p "require('./package.json').version")
+        echo "✅ Version updated to: v$NEW_VERSION"
+        git add package.json package-lock.json 2>/dev/null || true
+        git commit -m "chore(release): bump version to v$NEW_VERSION" || true
+    fi
+fi
+
+# --- STEP 5: ASSET COMPILATION ---
+echo "🛠️  Building Production Assets Locally..."
+export NODE_OPTIONS="--max-old-space-size=4096"
+if [ -f "package.json" ]; then
+    if grep -q '"build:ssr"' package.json; then
+        npm run build
+        npm run build:ssr
+    elif grep -q '"build"' package.json; then
+        npm run build
+    fi
+    if grep -q '"docs:build"' package.json; then
+        npm run docs:build || true
+    fi
+fi
+
+# Verify build output
+if [ -d "public/build" ] && [ ! -f "public/build/manifest.json" ]; then
+    echo "❌ Error: public/build/manifest.json is missing!"
+    exit 1
+fi
+echo "✅ Build verified successfully."
+
+# --- STEP 6: PREPARE REMOTE STAGING DIRECTORY ---
+echo "🛡️  Preparing staging directory on server: ${DEPLOY_STAGING_DIR}..."
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+    rm -rf '${DEPLOY_STAGING_DIR}'
+    mkdir -p '${DEPLOY_STAGING_DIR}'
+"
+
+# --- STEP 7: UPLOAD BUILD ASSETS ---
+if [ -d "public/build" ]; then
+    echo "📤 Uploading public/build to server staging..."
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -az --delete public/build/ "${REMOTE_USER}@${REMOTE_HOST}:${DEPLOY_STAGING_DIR}/build/"
+    else
+        scp -r -C -p public/build "${REMOTE_USER}@${REMOTE_HOST}:${DEPLOY_STAGING_DIR}/build"
+    fi
+fi
+
+if [ -d "bootstrap/ssr" ]; then
+    echo "📤 Uploading bootstrap/ssr to server staging..."
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -az --delete bootstrap/ssr/ "${REMOTE_USER}@${REMOTE_HOST}:${DEPLOY_STAGING_DIR}/ssr/"
+    else
+        scp -r -C -p bootstrap/ssr "${REMOTE_USER}@${REMOTE_HOST}:${DEPLOY_STAGING_DIR}/ssr"
+    fi
+fi
+
+if [ -f "deploy.sh" ]; then
+    echo "📤 Syncing deploy.sh to server..."
+    scp -p deploy.sh "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_APP_PATH}/deploy.sh"
+    ssh "${REMOTE_USER}@${REMOTE_HOST}" "chmod +x '${REMOTE_APP_PATH}/deploy.sh'"
+fi
+
+# --- STEP 8: PUSH GIT COMMITS ---
+echo "💾 Pushing latest commits to GitHub (origin/${EXPECTED_BRANCH})..."
+git push origin "$EXPECTED_BRANCH" || echo "⚠️ Git push completed or nothing new to push."
+
+# --- STEP 9: ATOMIC ASSET SWAP ON SERVER ---
+echo "🔄 Performing zero-downtime atomic asset swap on server..."
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+    set -e
+    cd '${REMOTE_APP_PATH}'
+    
+    if [ -d '${DEPLOY_STAGING_DIR}/build' ]; then
+        rm -rf public/build_previous
+        if [ -d 'public/build' ]; then
+            mv public/build public/build_previous
+        fi
+        mv '${DEPLOY_STAGING_DIR}/build' public/build
+    fi
+
+    if [ -d '${DEPLOY_STAGING_DIR}/ssr' ]; then
+        rm -rf bootstrap/ssr_previous
+        if [ -d 'bootstrap/ssr' ]; then
+            mv bootstrap/ssr bootstrap/ssr_previous
+        fi
+        mv '${DEPLOY_STAGING_DIR}/ssr' bootstrap/ssr
+    fi
+
+    rm -rf '${DEPLOY_STAGING_DIR}'
+"
+
+# --- STEP 10: EXECUTE REMOTE BACKEND DEPLOYMENT ---
+echo "⚡ Executing remote deployment script on ${REMOTE_HOST}..."
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "bash '${REMOTE_DEPLOY_SCRIPT}'"
+
+# Disarm trap on successful completion
+trap - EXIT
+
+# --- STEP 11: CLEANUP OLD SERVER BACKUPS ---
+ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+    rm -rf '${REMOTE_APP_PATH}/public/build_previous' '${REMOTE_APP_PATH}/bootstrap/ssr_previous'
+" || true
+
+echo "==================================================="
+echo "🎉 DEPLOYMENT FINISHED SUCCESSFULLY!"
+echo "🌐 Live URL: https://${APP_DOMAIN}"
+echo "==================================================="

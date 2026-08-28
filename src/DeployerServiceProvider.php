@@ -4,6 +4,8 @@ namespace Masri\Deployer;
 
 use Illuminate\Support\ServiceProvider;
 use Masri\Deployer\Commands\InitDeployment;
+use Masri\Deployer\Commands\CheckDeployment;
+use Masri\Deployer\Commands\StatusDeployment;
 
 class DeployerServiceProvider extends ServiceProvider
 {
@@ -12,6 +14,8 @@ class DeployerServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 InitDeployment::class,
+                CheckDeployment::class,
+                StatusDeployment::class,
             ]);
         }
     }

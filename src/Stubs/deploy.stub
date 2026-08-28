@@ -1,0 +1,127 @@
+#!/bin/bash
+# ==============================================================================
+# Masri Deployer — Remote Server Deployment Script
+# Target: {{PROD_APP_PATH}}/deploy.sh
+# Application: {{APP_NAME}}
+# ==============================================================================
+
+set -e
+
+PROJECT_DIR="${PROJECT_DIR:-{{PROD_APP_PATH}}}"
+BRANCH="{{PROD_BRANCH}}"
+SSR_PROCESS="{{SSR_PROCESS}}"
+QUEUE_PROCESS="{{QUEUE_PROCESS}}"
+APP_DOMAIN="{{APP_DOMAIN}}"
+PROCESS_MANAGER="{{PROCESS_MANAGER}}"
+
+export PATH=$HOME/bin:$PATH
+
+echo "🚀 Remote Deployment Script Started for $PROJECT_DIR..."
+
+cd "$PROJECT_DIR" || {
+    echo "❌ CRITICAL: Could not change directory to $PROJECT_DIR"
+    exit 1
+}
+
+# 1. MAINTENANCE MODE & RESTORATION TRAP
+if [ -f "artisan" ]; then
+    echo "🛡️  Entering maintenance mode..."
+    php artisan down --render="errors::503" || true
+
+    restore_app() {
+        echo "🔄 Ensuring application is brought back online..."
+        cd "$PROJECT_DIR" || exit
+        php artisan up || true
+    }
+    trap restore_app EXIT
+fi
+
+# 2. CODE SYNCHRONIZATION
+echo "🔄 Pulling latest code from origin/$BRANCH..."
+if [ -d ".git" ]; then
+    git fetch origin "$BRANCH"
+    git reset --hard "origin/$BRANCH"
+    git clean -fd -e .deploy/ -e public/blog -e public/brain -e storage/ -e .env || true
+else
+    echo "⚠️ Notice: .git directory not found in $PROJECT_DIR"
+fi
+
+if [ -d "public/public" ]; then
+    rm -rf public/public
+fi
+
+# 3. PHP COMPOSER DEPENDENCIES
+if [ -f "composer.json" ]; then
+    echo "📦 Installing/Updating Composer Dependencies..."
+    composer install --no-interaction --prefer-dist --optimize-autoloader --no-dev
+fi
+
+# 4. DATABASE MIGRATIONS & SEEDING (If Laravel)
+if [ -f "artisan" ]; then
+    echo "🏃 Running Database Migrations..."
+    php artisan migrate --force || echo "⚠️ Migration check finished"
+
+    # 5. CONFIGURATION & CACHE OPTIMIZATION
+    echo "🧹 Optimizing Configuration & Route Caches..."
+    php artisan optimize:clear
+    php artisan config:cache || true
+    php artisan route:clear || true
+    php artisan view:cache || true
+
+    # Optional dynamic sitemap generation if command exists
+    if php artisan list | grep -q "sitemap:generate"; then
+        echo "🗺️ Generating dynamic sitemap..."
+        php artisan sitemap:generate || echo "⚠️ Sitemap notice"
+    fi
+fi
+
+# 6. PROCESS MANAGER RESTART (Systemd, Supervisor, PM2)
+echo "♻️ Restarting Processes (SSR / Workers)..."
+if [ "$PROCESS_MANAGER" == "systemd" ] || command -v systemctl &> /dev/null; then
+    if [ -n "$SSR_PROCESS" ]; then
+        systemctl --user restart "$SSR_PROCESS" 2>/dev/null || echo "⚠️ Systemd SSR restart notice"
+    fi
+    if [ -n "$QUEUE_PROCESS" ]; then
+        systemctl --user restart "$QUEUE_PROCESS" 2>/dev/null || echo "⚠️ Systemd Queue restart notice"
+    fi
+elif [ "$PROCESS_MANAGER" == "supervisor" ] || command -v supervisorctl &> /dev/null; then
+    if [ -n "$SSR_PROCESS" ]; then
+        supervisorctl restart "$SSR_PROCESS" 2>/dev/null || echo "⚠️ Supervisor SSR restart notice"
+    fi
+    if [ -n "$QUEUE_PROCESS" ]; then
+        supervisorctl restart "$QUEUE_PROCESS" 2>/dev/null || echo "⚠️ Supervisor Queue restart notice"
+    fi
+elif [ "$PROCESS_MANAGER" == "pm2" ] || command -v pm2 &> /dev/null || [ -f "$HOME/bin/pm2" ]; then
+    PM2_BIN=$(command -v pm2 || echo "$HOME/bin/pm2")
+    if [ -n "$SSR_PROCESS" ]; then
+        $PM2_BIN reload "$SSR_PROCESS" 2>/dev/null || $PM2_BIN restart "$SSR_PROCESS" 2>/dev/null || echo "⚠️ PM2 reload notice"
+    fi
+fi
+
+# 7. BRING APPLICATION ONLINE
+if [ -f "artisan" ]; then
+    echo "🟢 Bringing application out of maintenance mode..."
+    php artisan up
+    trap - EXIT
+fi
+
+# 8. HEALTH CHECK
+if [ -n "$APP_DOMAIN" ]; then
+    echo "🩺 Verifying application health..."
+    for path in "" "/up" "/robots.txt" "/sitemap.xml"; do
+        status="000"
+        for attempt in 1 2 3; do
+            status=$(curl --silent --show-error --location --output /dev/null --write-out "%{http_code}" --max-time 15 "https://${APP_DOMAIN}${path}" || true)
+            if [ "$status" = "200" ]; then
+                echo "  ✅ https://${APP_DOMAIN}${path} -> HTTP $status"
+                break
+            fi
+            sleep 2
+        done
+        if [ "$status" != "200" ] && [ -n "$path" ]; then
+            echo "  ⚠️ Notice: HTTP status $status for https://${APP_DOMAIN}${path}"
+        fi
+    done
+fi
+
+echo "✅ Remote deployment completed successfully!"

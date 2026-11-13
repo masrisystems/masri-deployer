@@ -2,7 +2,7 @@
   "name": "masrisystems/masri-deployer",
   "description": "Universal deployment orchestrator and GitHub Actions workflow generator for Laravel, Node, and Static projects",
   "type": "library",
-  "license": "MIT",
+  "license": "proprietary",
   "authors": [
     {
       "name": "Masri Systems",

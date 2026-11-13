@@ -94,4 +94,4 @@ php artisan deploy:check
 
 ## 📜 License
 
-MIT License © [Masri Systems](https://masrisystems.com)
+[Masri Systems Non-Commercial Source-Available License (MS-NC-1.0)](LICENSE) © [Masri Systems](https://masrisystems.com) — personal and academic use only; business and commercial environments prohibited without a commercial license (`hallo@masrisystems.com`).
